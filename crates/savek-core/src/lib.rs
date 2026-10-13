@@ -37,6 +37,7 @@ pub struct ScanReport {
     pub files: Vec<FileEntry>,
     pub warnings: Vec<ScanWarning>,
     pub skipped_links: usize,
+    pub skipped_mounts: usize,
 }
 
 /// Enumerate files below a user-selected directory.
@@ -48,12 +49,18 @@ pub struct ScanReport {
 /// Important: this function is not an isolation/security boundary for hostile
 /// concurrently modified filesystems; it is a read-only enumeration primitive.
 pub fn scan_directory(root: &Path) -> io::Result<ScanReport> {
-    if !root.is_dir() {
+    let root_meta = fs::symlink_metadata(root)?;
+    if is_link_like(&root_meta) || !root_meta.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "selected source is not a directory",
         ));
     }
+    #[cfg(unix)]
+    let root_device = {
+        use std::os::unix::fs::MetadataExt;
+        root_meta.dev()
+    };
     let mut report = ScanReport::default();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -90,9 +97,17 @@ pub fn scan_directory(root: &Path) -> io::Result<ScanReport> {
                 }
             };
             let ty = metadata.file_type();
-            if ty.is_symlink() {
+            if is_link_like(&metadata) {
                 report.skipped_links += 1;
             } else if ty.is_dir() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if metadata.dev() != root_device {
+                        report.skipped_mounts += 1;
+                        continue;
+                    }
+                }
                 pending.push(path);
             } else if ty.is_file() {
                 report.files.push(FileEntry {
@@ -106,6 +121,21 @@ pub fn scan_directory(root: &Path) -> io::Result<ScanReport> {
     }
     report.files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     Ok(report)
+}
+
+fn is_link_like(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT: includes junctions, not just symlinks.
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn category_for_path(path: &Path) -> FileCategory {
