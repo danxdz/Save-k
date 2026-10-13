@@ -1,0 +1,13 @@
+/target/
+**/.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.cache/
