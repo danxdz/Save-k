@@ -195,6 +195,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn rejects_symlink_as_root() {
+        use std::os::unix::fs::symlink;
+        let real = temp_dir();
+        let parent = temp_dir();
+        let link = parent.join("linked-root");
+        symlink(&real, &link).unwrap();
+        assert!(scan_directory(&link).is_err());
+        fs::remove_dir_all(parent).unwrap();
+        fs::remove_dir_all(real).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn skips_symlink_to_another_directory() {
         use std::os::unix::fs::symlink;
         let root = temp_dir();
