@@ -1,6 +1,7 @@
 //! Experimental Save-K visual library: a Picasa-inspired, local-only gallery.
 //! No scanned file is moved, renamed, modified or uploaded.
 mod thumbnails;
+mod duplicate_view;
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use savek_core::catalog::{Catalog, CatalogEntry, RefreshStats};
