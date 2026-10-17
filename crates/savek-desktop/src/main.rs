@@ -341,7 +341,7 @@ impl LibraryApp {
 
     fn contents(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).fill(Color32::from_rgb(249, 250, 252)))
+            .frame(egui::Frame::default().fill(Color32::from_rgb(249, 250, 252)))
             .show(ctx, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -460,34 +460,31 @@ impl LibraryApp {
 
     fn list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let files = self.files.clone();
+        self.more_button(ui, ctx);
         egui::ScrollArea::vertical()
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("file_list")
-                    .show_rows(ui, 28.0, files.len(), |ui, rows| {
-                        for index in rows {
-                            let file = &files[index];
-                            ui.horizontal(|ui| {
-                                if ui.selectable_label(
-                                    self.selected_file.as_ref()
-                                        .is_some_and(|entry| entry.path == file.path),
-                                    Path::new(&file.path)
-                                        .file_name()
-                                        .and_then(|value| value.to_str())
-                                        .unwrap_or(&file.path),
-                                ).clicked() {
-                                    self.selected_file = Some(file.clone());
-                                }
-                                ui.label(RichText::new(category_name(file.category))
-                                    .small().color(SOFT_TEXT));
-                                ui.label(RichText::new(format_size(file.size_bytes))
-                                    .small().color(SOFT_TEXT));
-                                ui.label(RichText::new(date_label(file.modified_unix_seconds))
-                                    .small().color(SOFT_TEXT));
-                            });
+            .id_salt("file_list")
+            .show_rows(ui, 28.0, files.len(), |ui, rows| {
+                for index in rows {
+                    let file = &files[index];
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(
+                            self.selected_file.as_ref()
+                                .is_some_and(|entry| entry.path == file.path),
+                            Path::new(&file.path)
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or(&file.path),
+                        ).clicked() {
+                            self.selected_file = Some(file.clone());
                         }
+                        ui.label(RichText::new(category_name(file.category))
+                            .small().color(SOFT_TEXT));
+                        ui.label(RichText::new(format_size(file.size_bytes))
+                            .small().color(SOFT_TEXT));
+                        ui.label(RichText::new(date_label(file.modified_unix_seconds))
+                            .small().color(SOFT_TEXT));
                     });
-                self.more_button(ui, ctx);
+                }
             });
     }
 
