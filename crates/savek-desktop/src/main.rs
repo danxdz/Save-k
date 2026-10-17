@@ -167,6 +167,12 @@ impl LibraryApp {
                             self.has_more = page.len() == PAGE_SIZE;
                             if offset == 0 {
                                 self.files = page;
+                                if !self.files.is_empty()
+                                    && self.selected_folder.is_none()
+                                    && self.status.starts_with("Choose a folder")
+                                {
+                                    self.status = "Showing previously indexed local files. Add a folder to scan more.".into();
+                                }
                             } else {
                                 self.files.extend(page);
                             }
@@ -364,6 +370,9 @@ impl LibraryApp {
                     }
                 });
                 ui.label(RichText::new(&self.status).small().color(SOFT_TEXT));
+                if self.view_mode == ViewMode::Gallery {
+                    ui.label(RichText::new("Grouped by file modification month. Camera capture dates are not indexed yet.").small().color(SOFT_TEXT));
+                }
                 if let Some(error) = &self.error {
                     ui.colored_label(Color32::from_rgb(186, 55, 50), error);
                 }
