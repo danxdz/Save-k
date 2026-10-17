@@ -298,8 +298,10 @@ impl DisjointSet {
     fn find(&mut self, index: usize) -> usize {
         let mut current = index;
         while current != self.parents[current] {
-            self.parents[current] = self.parents[self.parents[current]];
-            current = self.parents[current];
+            let parent = self.parents[current];
+            let grandparent = self.parents[parent];
+            self.parents[current] = grandparent;
+            current = grandparent;
         }
         current
     }
@@ -405,6 +407,21 @@ mod tests {
         let report = analyze_photos(&entries);
         assert!(report.exact_groups.is_empty());
         assert_eq!(report.unreadable_files, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrelated_black_and_white_images_are_not_visual_matches() {
+        let root = temporary();
+        let black = root.join("black.png");
+        let white = root.join("white.png");
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([0, 0, 0, 255]))
+            .save(&black).unwrap();
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([255, 255, 255, 255]))
+            .save(&white).unwrap();
+        let report = analyze_photos(&[entry(&black), entry(&white)]);
+        assert!(report.exact_groups.is_empty());
+        assert!(report.visual_groups.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
