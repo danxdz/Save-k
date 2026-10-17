@@ -253,6 +253,7 @@ mod tests {
         fs::remove_file(&original).unwrap();
         assert_eq!(catalog.refresh_source(&root).unwrap().indexed_files, 0);
         assert_eq!(catalog.file_count().unwrap(), 0);
+        drop(catalog);
         fs::remove_dir_all(temporary).unwrap();
     }
 
@@ -267,6 +268,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert!(catalog.refresh_source(&root).is_err());
         assert_eq!(catalog.file_count().unwrap(), 1);
+        drop(catalog);
         fs::remove_dir_all(temporary).unwrap();
     }
 
@@ -276,6 +278,7 @@ mod tests {
         let mut catalog = Catalog::open(&root.join("library.sqlite")).unwrap();
         assert!(matches!(catalog.refresh_source(&root),
             Err(CatalogError::InvalidSource(_))));
+        drop(catalog);
         fs::remove_dir_all(root).unwrap();
     }
 }
