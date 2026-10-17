@@ -6,3 +6,4 @@ license.workspace = true
 description = "Read-only source indexing primitives for Save-K"
 
 [dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
