@@ -126,6 +126,7 @@ impl LibraryApp {
         };
         self.duplicates_running = true;
         self.show_duplicates = true;
+        self.selected_file = None;
         self.duplicate_report = None;
         self.duplicate_groups_visible = 20;
         self.error = None;
@@ -342,6 +343,7 @@ impl LibraryApp {
                 ui.separator();
                 if ui.selectable_label(self.show_duplicates, "Review duplicates").clicked() {
                     self.show_duplicates = true;
+                    self.selected_file = None;
                 }
                 ui.add_space(14.0);
                 ui.separator();
