@@ -237,14 +237,12 @@ impl LibraryApp {
                                         .and_then(|name| name.to_str())
                                         .unwrap_or(&file.path)
                                 ).strong()
-                            );
+                            ).on_hover_text(&file.path);
                             ui.label(RichText::new(format_size(file.size_bytes)).weak());
                             if ui.small_button("Copy path").clicked() {
                                 ui.ctx().copy_text(file.path.clone());
                             }
                         });
-                        ui.label(RichText::new(&file.path).weak().small());
-                        ui.separator();
                     }
                 });
         });
