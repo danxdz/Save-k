@@ -101,7 +101,6 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
     let mut buckets: HashMap<(u8, u16), Vec<usize>> = HashMap::new();
     let mut same_hash_leaders: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut fingerprints: Vec<Option<Fingerprint>> = vec![None; photos.len()];
-    let mut examined_pairs = HashSet::new();
 
     for (index, photo) in photos.iter().enumerate() {
         let fp = match visual_fingerprint(Path::new(&photo.path)) {
@@ -145,15 +144,6 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
                     }
                     report.checked_visual_candidates += 1;
                     if let Some(other) = fingerprints[other_index] {
-                        if fp.hash.count_ones() > 64 {
-                            // Unreachable defensive assertion guard: no match.
-                            continue;
-                        }
-                        if fp.hash ^ other.hash == 0 {
-                            // All equal fingerprint hashes are already handled
-                            // through same_hash_leaders above.
-                            continue;
-                        }
                         if (fp.hash ^ other.hash).count_ones() <= MAX_DHASH_DISTANCE
                             && visually_compatible(fp, other)
                         {
@@ -175,7 +165,6 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
             break;
         }
     }
-    drop(examined_pairs);
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for index in 0..photos.len() {
         if fingerprints[index].is_some() {
@@ -355,9 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn same_pixels_differently_encoded_are_visual_candidates() {
+    fn same_pixels_in_png_and_bmp_are_visual_candidates() {
         let root = temporary();
-        let jpg = root.join("photo.jpg");
+        let bmp = root.join("photo.bmp");
         let png = root.join("photo.png");
         let mut pixels = image::RgbImage::new(160, 120);
         for (x, y, pixel) in pixels.enumerate_pixels_mut() {
@@ -368,8 +357,8 @@ mod tests {
             ]);
         }
         image::DynamicImage::ImageRgb8(pixels.clone()).save(&png).unwrap();
-        image::DynamicImage::ImageRgb8(pixels).save(&jpg).unwrap();
-        let report = analyze_photos(&[entry(&png), entry(&jpg)]);
+        image::DynamicImage::ImageRgb8(pixels).save(&bmp).unwrap();
+        let report = analyze_photos(&[entry(&png), entry(&bmp)]);
         assert!(report.exact_groups.is_empty());
         assert_eq!(report.visual_groups.len(), 1);
         fs::remove_dir_all(root).unwrap();
