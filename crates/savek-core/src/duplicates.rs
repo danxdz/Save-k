@@ -121,7 +121,13 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
         // comparisons or flood the candidate bucket vectors.
         let mut same_hash_representative = false;
         if let Some(leaders) = same_hash_leaders.get(&fp.hash) {
-            for &leader in leaders {
+            // Keep same-hash representative lookups bounded as well.
+            for &leader in leaders.iter().take(96) {
+                if report.checked_visual_candidates >= MAX_CANDIDATE_COMPARISONS {
+                    report.comparison_limit_reached = true;
+                    break;
+                }
+                report.checked_visual_candidates += 1;
                 if let Some(other) = fingerprints[leader] {
                     if visually_compatible(fp, other) {
                         union.join(index, leader);
@@ -130,6 +136,12 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
                     }
                 }
             }
+            if leaders.len() > 96 {
+                report.comparison_limit_reached = true;
+            }
+        }
+        if report.comparison_limit_reached {
+            break;
         }
         if same_hash_representative {
             continue;
