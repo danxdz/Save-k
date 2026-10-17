@@ -130,7 +130,32 @@ fn draw_group(
             }
         });
         if group.photos.len() > 8 {
-            ui.label(format!("… and {} more files in this candidate group.", group.photos.len() - 8));
+            ui.collapsing(
+                format!("Show all {} file paths in this group", group.photos.len()),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(format!("all_paths_{category}_{number}"))
+                        .max_height(220.0)
+                        .show_rows(ui, 25.0, group.photos.len(), |ui, rows| {
+                            for index in rows {
+                                let photo = &group.photos[index];
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(
+                                            Path::new(&photo.path)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                                .unwrap_or("Unnamed file")
+                                        ).small()
+                                    ).on_hover_text(&photo.path);
+                                    if ui.small_button("Copy path").clicked() {
+                                        ui.ctx().copy_text(photo.path.clone());
+                                    }
+                                });
+                            }
+                        });
+                },
+            );
         }
     });
     ui.add_space(8.0);
