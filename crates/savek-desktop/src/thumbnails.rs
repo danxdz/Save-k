@@ -164,11 +164,11 @@ fn decode_thumbnail(path: &Path) -> Option<ColorImage> {
         .ok()?
         .with_guessed_format()
         .ok()?;
-    reader.limits(image::Limits {
-        max_image_width: Some(DECODE_EDGE_LIMIT),
-        max_image_height: Some(DECODE_EDGE_LIMIT),
-        max_alloc: Some(MAX_SOURCE_ALLOC),
-    });
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(DECODE_EDGE_LIMIT);
+    limits.max_image_height = Some(DECODE_EDGE_LIMIT);
+    limits.max_alloc = Some(MAX_SOURCE_ALLOC);
+    reader.limits(limits);
     let thumbnail = reader.decode().ok()?.thumbnail(320, 220).to_rgba8();
     let size = [thumbnail.width() as usize, thumbnail.height() as usize];
     Some(ColorImage::from_rgba_unmultiplied(size, thumbnail.as_raw()))
