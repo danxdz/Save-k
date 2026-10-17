@@ -1,17 +1,30 @@
-//! Experimental Windows-first desktop UI.
-//! Indexes only user-selected folders; never changes indexed originals.
-use eframe::egui::{self, RichText};
+//! Experimental Save-K visual library: a Picasa-inspired, local-only gallery.
+//! No scanned file is moved, renamed, modified or uploaded.
+mod thumbnails;
+
+use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use savek_core::catalog::{Catalog, CatalogEntry, RefreshStats};
 use savek_core::FileCategory;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use thumbnails::Thumbnails;
 
-const RESULT_LIMIT: usize = 1000;
+const PAGE_SIZE: usize = 120;
+const ACCENT: Color32 = Color32::from_rgb(39, 119, 107);
+const SOFT_TEXT: Color32 = Color32::from_rgb(118, 125, 137);
+const DARK_TEXT: Color32 = Color32::from_rgb(43, 53, 62);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Gallery,
+    List,
+}
 
 enum JobEvent {
     ScanFinished(Result<RefreshStats, String>),
     SearchFinished {
-        query: String,
+        token: u64,
+        offset: usize,
         result: Result<Vec<CatalogEntry>, String>,
     },
 }
@@ -20,13 +33,20 @@ struct LibraryApp {
     db_path: Option<PathBuf>,
     selected_folder: Option<PathBuf>,
     files: Vec<CatalogEntry>,
+    selected_file: Option<CatalogEntry>,
     query: String,
     filter: Option<FileCategory>,
+    view_mode: ViewMode,
+    tile_width: f32,
     scan_running: bool,
+    page_loading: bool,
+    has_more: bool,
+    search_token: u64,
     status: String,
     error: Option<String>,
     sender: Sender<JobEvent>,
     receiver: Receiver<JobEvent>,
+    thumbnails: Thumbnails,
 }
 
 impl LibraryApp {
@@ -40,15 +60,22 @@ impl LibraryApp {
             db_path,
             selected_folder: None,
             files: Vec::new(),
+            selected_file: None,
             query: String::new(),
-            filter: None,
+            filter: Some(FileCategory::Photo),
+            view_mode: ViewMode::Gallery,
+            tile_width: 174.0,
             scan_running: false,
-            status: "No folder selected. Choose a local folder to begin.".into(),
+            page_loading: false,
+            has_more: false,
+            search_token: 0,
+            status: "Choose a folder to add photos to your local library.".into(),
             error,
             sender,
             receiver,
+            thumbnails: Thumbnails::new(ctx),
         };
-        app.start_search(ctx);
+        app.start_search(ctx, false);
         app
     }
 
@@ -56,39 +83,52 @@ impl LibraryApp {
         if self.scan_running {
             return;
         }
-        let (Some(path), Some(database)) = (
+        let (Some(folder), Some(database)) = (
             self.selected_folder.clone(),
             self.db_path.clone(),
         ) else {
-            self.error = Some("Choose a folder and ensure local catalog storage is available.".into());
+            self.error = Some("Select a folder and ensure local catalog storage is available.".into());
             return;
         };
         self.scan_running = true;
         self.error = None;
-        self.status = format!("Scanning {} (read-only)…", path.display());
+        self.status = format!("Indexing {} without changing original files…", folder.display());
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let outcome = Catalog::open(&database)
-                .and_then(|mut catalog| catalog.refresh_source(&path))
-                .map_err(|e| e.to_string());
+                .and_then(|mut catalog| catalog.refresh_source(&folder))
+                .map_err(|error| error.to_string());
             let _ = sender.send(JobEvent::ScanFinished(outcome));
             repaint.request_repaint();
         });
     }
 
-    fn start_search(&mut self, ctx: &egui::Context) {
+    fn start_search(&mut self, ctx: &egui::Context, append: bool) {
+        if append && (self.page_loading || !self.has_more) {
+            return;
+        }
         let Some(database) = self.db_path.clone() else {
             return;
         };
+        let offset = if append { self.files.len() } else { 0 };
+        if !append {
+            self.files.clear();
+            self.has_more = false;
+            self.selected_file = None;
+        }
+        self.search_token = self.search_token.wrapping_add(1);
+        let token = self.search_token;
         let query = self.query.trim().to_owned();
+        let category = self.filter;
+        self.page_loading = true;
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let result = Catalog::open(&database)
-                .and_then(|catalog| catalog.search(&query, RESULT_LIMIT))
-                .map_err(|e| e.to_string());
-            let _ = sender.send(JobEvent::SearchFinished { query, result });
+                .and_then(|catalog| catalog.search_filtered(&query, category, offset, PAGE_SIZE))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(JobEvent::SearchFinished { token, offset, result });
             repaint.request_repaint();
         });
     }
@@ -101,30 +141,41 @@ impl LibraryApp {
                     match result {
                         Ok(stats) => {
                             self.status = format!(
-                                "Indexed {} files. Skipped {} links and {} nested mounts.",
+                                "{} files indexed. Originals unchanged. Skipped {} links, {} mounts.",
                                 stats.indexed_files, stats.skipped_links, stats.skipped_mounts
                             );
                             self.error = None;
-                            self.start_search(ctx);
+                            self.thumbnails.clear();
+                            self.start_search(ctx, false);
                         }
                         Err(message) => {
                             self.error = Some(format!(
-                                "Scan not saved: {message}. Previous catalog snapshots were kept."
+                                "Scan failed: {message}. Previous local catalog kept."
                             ));
-                            self.status = "Scan incomplete. Existing catalog preserved.".into();
+                            self.status = "No files were moved or deleted.".into();
                         }
                     }
                 }
-                JobEvent::SearchFinished { query, result } => {
-                    // Ignore responses to older queries typed while jobs ran.
-                    if query != self.query.trim() {
+                JobEvent::SearchFinished { token, offset, result } => {
+                    // Results from a previous query/filter must never replace a newer page.
+                    if token != self.search_token {
                         continue;
                     }
+                    self.page_loading = false;
                     match result {
-                        Ok(files) => {
-                            self.files = files;
+                        Ok(page) => {
+                            self.has_more = page.len() == PAGE_SIZE;
+                            if offset == 0 {
+                                self.files = page;
+                            } else {
+                                self.files.extend(page);
+                            }
+                            self.error = None;
                         }
-                        Err(message) => self.error = Some(format!("Catalog search: {message}")),
+                        Err(message) => {
+                            self.has_more = false;
+                            self.error = Some(format!("Catalog search failed: {message}"));
+                        }
                     }
                 }
             }
@@ -133,139 +184,393 @@ impl LibraryApp {
 
     fn choose_folder(&mut self) {
         if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Choose a folder to index (read-only)")
+            .set_title("Choose a local folder to index (read-only)")
             .pick_folder()
         {
             self.selected_folder = Some(folder);
-            self.status = "Folder selected. Click Scan to index it.".into();
+            self.status = "Folder selected. Click Scan to add it to your library.".into();
             self.error = None;
         }
     }
 
-    fn controls(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.heading("Save-K");
-                ui.label(RichText::new("Private local library · experimental").weak());
+    fn header(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("savek_header")
+            .exact_height(123.0)
+            .show(ctx, |ui| {
+                ui.add_space(9.0);
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new("Save-K").size(24.0).color(ACCENT).strong());
+                    ui.label(RichText::new("PHOTO & FILE LIBRARY").size(11.0).color(SOFT_TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("LOCAL ONLY").strong().color(ACCENT).small());
+                    });
+                });
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Add folder…").clicked() {
+                        self.choose_folder();
+                    }
+                    if ui.add_enabled(
+                        !self.scan_running,
+                        egui::Button::new("Scan selected folder")
+                    ).clicked() {
+                        self.start_scan(ctx);
+                    }
+                    if self.scan_running {
+                        ui.spinner();
+                    }
+                    if let Some(folder) = &self.selected_folder {
+                        ui.label(RichText::new(folder.display().to_string()).small().color(SOFT_TEXT));
+                    }
+                });
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.label("Search");
+                    let input = ui.add_sized(
+                        [275.0, 24.0],
+                        egui::TextEdit::singleline(&mut self.query)
+                            .hint_text("Photo name, document, folder…"),
+                    );
+                    let enter = input.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Find").clicked() || enter {
+                        self.start_search(ctx, false);
+                    }
+                    ui.separator();
+                    ui.selectable_value(&mut self.view_mode, ViewMode::Gallery, "Gallery");
+                    ui.selectable_value(&mut self.view_mode, ViewMode::List, "List");
+                    if self.view_mode == ViewMode::Gallery {
+                        ui.add(
+                            egui::Slider::new(&mut self.tile_width, 130.0..=240.0)
+                                .show_value(false)
+                                .text("Size")
+                        );
+                    }
+                });
             });
-            ui.add_space(7.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Choose folder…").clicked() {
-                    self.choose_folder();
-                }
-                if ui.add_enabled(!self.scan_running, egui::Button::new("Scan folder")).clicked() {
-                    self.start_scan(ctx);
-                }
-                if self.scan_running {
-                    ui.spinner();
-                }
-                if let Some(path) = &self.selected_folder {
-                    ui.label(RichText::new(path.display().to_string()).small());
-                }
-            });
-            ui.add_space(5.0);
-            ui.horizontal(|ui| {
-                ui.label("Search:");
-                let response = ui.add_sized(
-                    [300.0, 25.0],
-                    egui::TextEdit::singleline(&mut self.query).hint_text("Filename or path"),
-                );
-                let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if ui.button("Find").clicked() || enter {
-                    self.start_search(ctx);
-                }
-                ui.label(RichText::new("Search is local; filenames are not uploaded.").weak().small());
-            });
-            ui.add_space(8.0);
-        });
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("category_sidebar")
-            .default_width(155.0)
+        egui::SidePanel::left("library_navigation")
+            .default_width(170.0)
+            .min_width(160.0)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.heading("Library");
-                ui.add_space(6.0);
-                for (category, title) in [
-                    (None, "All files"),
+                ui.add_space(13.0);
+                ui.label(RichText::new("YOUR LIBRARY").strong().color(SOFT_TEXT).small());
+                ui.add_space(12.0);
+                for (category, label) in [
                     (Some(FileCategory::Photo), "Photos"),
                     (Some(FileCategory::Video), "Videos"),
                     (Some(FileCategory::Document), "Documents"),
                     (Some(FileCategory::Audio), "Audio"),
                     (Some(FileCategory::Archive), "Archives"),
-                    (Some(FileCategory::Other), "Other"),
+                    (Some(FileCategory::Other), "Other files"),
+                    (None, "All files"),
                 ] {
-                    ui.selectable_value(&mut self.filter, category, title);
+                    if ui.selectable_label(self.filter == category, label).clicked() {
+                        if self.filter != category {
+                            self.filter = category;
+                            self.start_search(ctx, false);
+                        }
+                    }
+                    ui.add_space(3.0);
                 }
+                ui.add_space(14.0);
                 ui.separator();
-                ui.label(RichText::new("Files stay in their original folders.").small().weak());
-                ui.label(RichText::new("Catalog metadata is currently unencrypted.").small().weak());
+                ui.label(RichText::new("PRIVATE BY DESIGN").color(ACCENT).strong().small());
+                ui.label(RichText::new(
+                    "Organize and preview without moving your originals."
+                ).small().color(SOFT_TEXT));
+                ui.add_space(8.0);
+                ui.label(RichText::new(
+                    "Catalog paths aren't encrypted yet."
+                ).small().color(SOFT_TEXT));
             });
     }
 
-    fn library(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let visible: Vec<&CatalogEntry> = self.files.iter()
-                .filter(|file| self.filter.is_none() || self.filter == Some(file.category))
-                .collect();
-            ui.horizontal(|ui| {
-                ui.heading("Files");
-                ui.label(format!("{} results (first {RESULT_LIMIT} maximum)", visible.len()));
-            });
-            ui.label(RichText::new(&self.status).weak());
-            if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::from_rgb(200, 70, 60), error);
-            }
-            ui.separator();
-            if visible.is_empty() {
-                ui.label("No matching files. Select a folder and scan it, or change your search.");
-                return;
-            }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(ui, 30.0, visible.len(), |ui, row_range| {
-                    for row in row_range {
-                        let file = visible[row];
-                        ui.horizontal(|ui| {
-                            ui.label(category_label(file.category));
-                            ui.label(
-                                RichText::new(
-                                    Path::new(&file.path)
-                                        .file_name()
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or(&file.path)
-                                ).strong()
-                            ).on_hover_text(&file.path);
-                            ui.label(RichText::new(format_size(file.size_bytes)).weak());
-                            if ui.small_button("Copy path").clicked() {
-                                ui.ctx().copy_text(file.path.clone());
-                            }
-                        });
+    fn inspector(&mut self, ctx: &egui::Context) {
+        let Some(entry) = self.selected_file.clone() else {
+            return;
+        };
+        egui::SidePanel::right("details")
+            .default_width(250.0)
+            .min_width(225.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.heading("Details");
+                    if ui.small_button("Close").clicked() {
+                        self.selected_file = None;
                     }
                 });
-        });
+                ui.add_space(8.0);
+                let width = ui.available_width().min(240.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(width, 175.0),
+                    Sense::hover(),
+                );
+                if entry.category == FileCategory::Photo {
+                    self.thumbnails.paint(ui, &entry.path, rect);
+                } else {
+                    generic_preview(ui, entry.category, rect);
+                }
+                ui.add_space(14.0);
+                let name = Path::new(&entry.path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("Unnamed file");
+                ui.label(RichText::new(name).strong().size(15.0));
+                ui.add_space(8.0);
+                ui.label(format!("Type: {}", category_name(entry.category)));
+                ui.label(format!("Size: {}", format_size(entry.size_bytes)));
+                ui.label(format!("Modified: {}", date_label(entry.modified_unix_seconds)));
+                ui.add_space(8.0);
+                ui.label(RichText::new(&entry.path).small().color(SOFT_TEXT));
+                ui.add_space(8.0);
+                if ui.button("Copy file path").clicked() {
+                    ui.ctx().copy_text(entry.path.clone());
+                }
+                ui.separator();
+                ui.label(RichText::new(
+                    "This is a preview; your file hasn't been altered."
+                ).small().color(SOFT_TEXT));
+            });
+    }
+
+    fn contents(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(Color32::from_rgb(249, 250, 252)))
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let section = match self.filter {
+                        Some(FileCategory::Photo) => "Photos",
+                        Some(FileCategory::Video) => "Videos",
+                        Some(FileCategory::Document) => "Documents",
+                        Some(FileCategory::Audio) => "Audio",
+                        Some(FileCategory::Archive) => "Archives",
+                        Some(FileCategory::Other) => "Other files",
+                        None => "All files",
+                    };
+                    ui.heading(RichText::new(section).size(22.0).color(DARK_TEXT));
+                    ui.label(RichText::new(format!(
+                        "{} loaded{}", self.files.len(),
+                        if self.has_more { " · more available" } else { "" }
+                    )).small().color(SOFT_TEXT));
+                    if self.page_loading {
+                        ui.spinner();
+                    }
+                });
+                ui.label(RichText::new(&self.status).small().color(SOFT_TEXT));
+                if let Some(error) = &self.error {
+                    ui.colored_label(Color32::from_rgb(186, 55, 50), error);
+                }
+                ui.separator();
+                if self.files.is_empty() {
+                    ui.add_space(24.0);
+                    if self.page_loading {
+                        ui.label("Finding local files…");
+                    } else {
+                        ui.label("No files yet. Choose and scan a local folder.");
+                    }
+                    return;
+                }
+                match self.view_mode {
+                    ViewMode::Gallery => self.gallery(ui, ctx),
+                    ViewMode::List => self.list(ui, ctx),
+                }
+            });
+    }
+
+    fn gallery(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let files = self.files.clone();
+        let groups = month_groups(&files);
+        let width = self.tile_width;
+        let height = 0.78 * width + 50.0;
+        let columns = (((ui.available_width() + 12.0) / (width + 12.0)).floor()
+            as usize).max(1);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(7.0);
+                for (month, indices) in groups {
+                    ui.label(RichText::new(month).strong().size(17.0).color(DARK_TEXT));
+                    ui.add_space(7.0);
+                    for chunk in indices.chunks(columns) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            for &index in chunk {
+                                let file = &files[index];
+                                let (rect, response) = ui.allocate_exact_size(
+                                    Vec2::new(width, height),
+                                    Sense::click(),
+                                );
+                                if ui.is_rect_visible(rect) {
+                                    let selected = self.selected_file.as_ref()
+                                        .is_some_and(|current| current.path == file.path);
+                                    let background = if selected {
+                                        Color32::from_rgb(222, 242, 237)
+                                    } else {
+                                        Color32::WHITE
+                                    };
+                                    ui.painter().rect_filled(rect, 8.0, background);
+                                    if selected {
+                                        ui.painter().rect_stroke(
+                                            rect, 8.0, Stroke::new(2.0, ACCENT),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                    let preview_rect = Rect::from_min_size(
+                                        rect.min + egui::vec2(7.0, 7.0),
+                                        egui::vec2(width - 14.0, width * 0.70),
+                                    );
+                                    if file.category == FileCategory::Photo {
+                                        self.thumbnails.paint(ui, &file.path, preview_rect);
+                                    } else {
+                                        generic_preview(ui, file.category, preview_rect);
+                                    }
+                                    let title = Path::new(&file.path)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("Unnamed file");
+                                    let max_chars = ((width - 20.0) / 7.0).floor() as usize;
+                                    ui.painter().text(
+                                        egui::pos2(rect.min.x + 10.0, preview_rect.max.y + 10.0),
+                                        Align2::LEFT_TOP,
+                                        truncate(title, max_chars.max(10)),
+                                        FontId::proportional(12.0),
+                                        DARK_TEXT,
+                                    );
+                                }
+                                if response.clicked() {
+                                    self.selected_file = Some(file.clone());
+                                }
+                                response.on_hover_text(&file.path);
+                            }
+                        });
+                        ui.add_space(10.0);
+                    }
+                    ui.add_space(13.0);
+                }
+                self.more_button(ui, ctx);
+            });
+    }
+
+    fn list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let files = self.files.clone();
+        self.more_button(ui, ctx);
+        egui::ScrollArea::vertical()
+            .id_salt("file_list")
+            .show_rows(ui, 28.0, files.len(), |ui, rows| {
+                for index in rows {
+                    let file = &files[index];
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(
+                            self.selected_file.as_ref()
+                                .is_some_and(|entry| entry.path == file.path),
+                            Path::new(&file.path)
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or(&file.path),
+                        ).clicked() {
+                            self.selected_file = Some(file.clone());
+                        }
+                        ui.label(RichText::new(category_name(file.category))
+                            .small().color(SOFT_TEXT));
+                        ui.label(RichText::new(format_size(file.size_bytes))
+                            .small().color(SOFT_TEXT));
+                        ui.label(RichText::new(date_label(file.modified_unix_seconds))
+                            .small().color(SOFT_TEXT));
+                    });
+                }
+            });
+    }
+
+    fn more_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if self.has_more || self.page_loading {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(
+                    self.has_more && !self.page_loading,
+                    egui::Button::new("Load more files"),
+                ).clicked() {
+                    self.start_search(ctx, true);
+                }
+                if self.page_loading {
+                    ui.spinner();
+                }
+            });
+            ui.add_space(15.0);
+        }
     }
 }
 
 impl eframe::App for LibraryApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.thumbnails.poll(ctx);
         self.receive_events(ctx);
-        self.controls(ctx);
+        self.header(ctx);
         self.sidebar(ctx);
-        self.library(ctx);
+        self.inspector(ctx);
+        self.contents(ctx);
     }
 }
 
-fn category_label(category: FileCategory) -> &'static str {
+fn generic_preview(ui: &egui::Ui, category: FileCategory, rect: Rect) {
+    ui.painter().rect_filled(rect, 6.0, Color32::from_rgb(229, 235, 239));
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.center(), Align2::CENTER_CENTER, category_name(category),
+            FontId::proportional(19.0), Color32::from_rgb(101, 113, 124),
+        );
+    }
+}
+
+fn category_name(category: FileCategory) -> &'static str {
     match category {
-        FileCategory::Photo => "PHOTO",
-        FileCategory::Video => "VIDEO",
-        FileCategory::Audio => "AUDIO",
-        FileCategory::Document => "DOC",
-        FileCategory::Archive => "ZIP",
-        FileCategory::Other => "FILE",
+        FileCategory::Photo => "Photo",
+        FileCategory::Video => "Video",
+        FileCategory::Audio => "Audio",
+        FileCategory::Document => "Document",
+        FileCategory::Archive => "Archive",
+        FileCategory::Other => "File",
+    }
+}
+
+fn month_groups(files: &[CatalogEntry]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let label = month_label(file.modified_unix_seconds);
+        match groups.last_mut() {
+            Some((month, indices)) if *month == label => indices.push(index),
+            _ => groups.push((label, vec![index])),
+        }
+    }
+    groups
+}
+
+fn month_label(timestamp: Option<i64>) -> String {
+    timestamp
+        .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+        .map(|time| time.format("%B %Y").to_string())
+        .unwrap_or_else(|| "Unknown modification date".into())
+}
+
+fn date_label(timestamp: Option<i64>) -> String {
+    timestamp
+        .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+        .map(|time| time.format("%d %b %Y").to_string())
+        .unwrap_or_else(|| "Unknown".into())
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_owned()
+    } else {
+        let leading: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{leading}…")
     }
 }
 
@@ -286,19 +591,25 @@ fn local_catalog_path() -> Result<PathBuf, String> {
         .ok_or("Could not locate local application data directory")?
         .join("SaveK");
     std::fs::create_dir_all(&folder)
-        .map_err(|e| format!("Cannot create local catalog directory: {e}"))?;
+        .map_err(|error| format!("Cannot create local catalog directory: {error}"))?;
     Ok(folder.join("library.sqlite"))
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1050.0, 700.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 780.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Save-K Local Library",
+        "Save-K — Local Photo Library",
         options,
-        Box::new(|cc| Ok(Box::new(LibraryApp::new(&cc.egui_ctx)))),
+        Box::new(|cc| {
+            let mut visuals = egui::Visuals::light();
+            visuals.selection.bg_fill = Color32::from_rgb(193, 228, 217);
+            visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+            cc.egui_ctx.set_visuals(visuals);
+            Ok(Box::new(LibraryApp::new(&cc.egui_ctx)))
+        }),
     )
 }
 
@@ -306,8 +617,13 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     #[test]
-    fn human_readable_sizes() {
-        assert_eq!(format_size(999), "999 B");
-        assert_eq!(format_size(2048), "2.0 KB");
+    fn names_are_truncated_on_unicode_character_boundaries() {
+        assert_eq!(truncate("short", 8), "short");
+        assert_eq!(truncate("abécdé", 4), "abé…");
+    }
+    #[test]
+    fn modification_dates_group_correctly() {
+        assert_eq!(month_label(Some(0)), "January 1970");
+        assert_eq!(month_label(None), "Unknown modification date");
     }
 }
