@@ -89,7 +89,12 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
             }
         }
     }
+    let mut exact_group_of = vec![None; photos.len()];
     for group in equal_content.into_values().filter(|group| group.len() > 1) {
+        let group_id = report.exact_groups.len();
+        for &index in &group {
+            exact_group_of[index] = Some(group_id);
+        }
         report.exact_groups.push(to_group(&photos, &group));
     }
 
@@ -173,6 +178,14 @@ pub fn analyze_photos(entries: &[CatalogEntry]) -> DuplicateReport {
         }
     }
     for group in groups.into_values().filter(|group| group.len() > 1) {
+        // Identical files should appear once, under Exact copies, not again
+        // as an identical Visual group. Mixed visual groups are still shown.
+        let first_exact = exact_group_of[group[0]];
+        if first_exact.is_some()
+            && group.iter().all(|&index| exact_group_of[index] == first_exact)
+        {
+            continue;
+        }
         report.visual_groups.push(to_group(&photos, &group));
     }
     report.exact_groups.sort_by_key(|g| std::cmp::Reverse(g.photos.len()));
@@ -361,6 +374,22 @@ mod tests {
         let report = analyze_photos(&[entry(&png), entry(&bmp)]);
         assert!(report.exact_groups.is_empty());
         assert_eq!(report.visual_groups.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identical_images_only_appear_in_exact_groups() {
+        let root = temporary();
+        let original = root.join("a.png");
+        let copy = root.join("b.png");
+        let pixels = image::RgbaImage::from_pixel(
+            64, 48, image::Rgba([25, 125, 221, 255])
+        );
+        pixels.save(&original).unwrap();
+        fs::copy(&original, &copy).unwrap();
+        let report = analyze_photos(&[entry(&original), entry(&copy)]);
+        assert_eq!(report.exact_groups.len(), 1);
+        assert!(report.visual_groups.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
