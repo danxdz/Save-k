@@ -11,8 +11,8 @@ This is **not** a complete Windows UI, NAS sync service, or secure vault.
 
 ```powershell
 cargo test -p savek-core
-cargo run -p savek-cli -- --db "$env:LOCALAPPDATA\\SaveK\\library.sqlite" scan "D:\\Photos"
-cargo run -p savek-cli -- --db "$env:LOCALAPPDATA\\SaveK\\library.sqlite" search "holiday"
+cargo run -p savek-cli -- --db "$env:LOCALAPPDATA\SaveK\library.sqlite" scan "D:\Photos"
+cargo run -p savek-cli -- --db "$env:LOCALAPPDATA\SaveK\library.sqlite" search "holiday"
 ```
 
 Create the `$env:LOCALAPPDATA\SaveK` directory first, if absent. For a mapped NAS drive, replace `D:\Photos` with the selected share folder. Do not scan a mapped share that you do not have permission to read.
