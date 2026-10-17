@@ -16,7 +16,7 @@ const DECODE_EDGE_LIMIT: u32 = 9000;
 enum ThumbState {
     Queued,
     Loaded(TextureHandle),
-    Unavailable,
+    Unavailable(&'static str),
 }
 struct Request {
     generation: u64,
@@ -25,7 +25,7 @@ struct Request {
 struct ResultMessage {
     generation: u64,
     path: String,
-    image: Option<ColorImage>,
+    image: Result<ColorImage, &'static str>,
 }
 
 /// Cache holding at most CACHE_CAP decoded thumbnails as GPU textures.
@@ -81,12 +81,12 @@ impl Thumbnails {
             }
             self.pending = self.pending.saturating_sub(1);
             let state = match message.image {
-                Some(image) => ThumbState::Loaded(ctx.load_texture(
+                Ok(image) => ThumbState::Loaded(ctx.load_texture(
                     format!("savek-thumb-{}", message.path),
                     image,
                     TextureOptions::LINEAR,
                 )),
-                None => ThumbState::Unavailable,
+                Err(reason) => ThumbState::Unavailable(reason),
             };
             self.items.insert(message.path.clone(), state);
             self.insertion_order.push_back(message.path);
@@ -136,8 +136,8 @@ impl Thumbnails {
             Some(ThumbState::Queued) => {
                 placeholder(painter, rect.center(), "Loading…");
             }
-            Some(ThumbState::Unavailable) => {
-                placeholder(painter, rect.center(), "No preview");
+            Some(ThumbState::Unavailable(reason)) => {
+                placeholder(painter, rect.center(), reason);
             }
             None => placeholder(painter, rect.center(), "Photo"),
         }
@@ -156,28 +156,27 @@ fn placeholder(painter: &egui::Painter, center: Pos2, caption: &str) {
 
 /// The decoder runs off the UI thread. Both file size and decoder allocations
 /// are capped as best effort; some image formats/decoders may ignore limits.
-fn decode_thumbnail(path: &Path) -> Option<ColorImage> {
-    if std::fs::metadata(path).ok()?.len() > MAX_SOURCE_BYTES {
-        return None;
+fn decode_thumbnail(path: &Path) -> Result<ColorImage, &'static str> {
+    let metadata = std::fs::metadata(path).map_err(|_| "File missing")?;
+    if metadata.len() > MAX_SOURCE_BYTES {
+        return Err("File over 40 MB");
     }
     let mut reader = image::ImageReader::open(path)
-        .ok()?
+        .map_err(|_| "Cannot open")?
         .with_guessed_format()
-        .ok()?;
+        .map_err(|_| "Unknown format")?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(DECODE_EDGE_LIMIT);
     limits.max_image_height = Some(DECODE_EDGE_LIMIT);
     limits.max_alloc = Some(MAX_SOURCE_ALLOC);
     reader.limits(limits);
-    // image::DynamicImage::thumbnail may enlarge tiny inputs when the
-    // requested bounds are larger than the source. Never upscale the
-    // decoded bitmap; scaling for display belongs in the UI renderer.
-    let decoded = reader.decode().ok()?;
+    // Do not enlarge small source images during thumbnail generation.
+    let decoded = reader.decode().map_err(|_| "Cannot decode")?;
     let target_width = decoded.width().min(320);
     let target_height = decoded.height().min(220);
     let thumbnail = decoded.thumbnail(target_width, target_height).to_rgba8();
     let size = [thumbnail.width() as usize, thumbnail.height() as usize];
-    Some(ColorImage::from_rgba_unmultiplied(size, thumbnail.as_raw()))
+    Ok(ColorImage::from_rgba_unmultiplied(size, thumbnail.as_raw()))
 }
 
 #[cfg(test)]
@@ -217,7 +216,20 @@ mod tests {
     }
 
     #[test]
+    fn non_image_bytes_report_decode_error() {
+        let folder = std::env::temp_dir().join(format!(
+            "savek-invalid-thumbnail-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("invalid.png");
+        std::fs::write(&path, b"not an actual PNG").unwrap();
+        assert!(decode_thumbnail(&path).is_err());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn unavailable_file_has_no_thumbnail() {
-        assert!(decode_thumbnail(Path::new("not-found-thumbnail-5993.jpg")).is_none());
+        assert!(decode_thumbnail(Path::new("not-found-thumbnail-5993.jpg")).is_err());
     }
 }
