@@ -1,10 +1,12 @@
 //! Experimental Save-K visual library: a Picasa-inspired, local-only gallery.
 //! No scanned file is moved, renamed, modified or uploaded.
 mod thumbnails;
+mod duplicate_view;
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use savek_core::catalog::{Catalog, CatalogEntry, RefreshStats};
 use savek_core::FileCategory;
+use savek_core::duplicates::{analyze_photos, DuplicateReport};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use thumbnails::Thumbnails;
@@ -27,6 +29,7 @@ enum JobEvent {
         offset: usize,
         result: Result<Vec<CatalogEntry>, String>,
     },
+    DuplicatesFinished(Result<DuplicateReport, String>),
 }
 
 struct LibraryApp {
@@ -34,6 +37,10 @@ struct LibraryApp {
     selected_folder: Option<PathBuf>,
     files: Vec<CatalogEntry>,
     selected_file: Option<CatalogEntry>,
+    show_duplicates: bool,
+    duplicates_running: bool,
+    duplicate_report: Option<DuplicateReport>,
+    duplicate_groups_visible: usize,
     query: String,
     filter: Option<FileCategory>,
     view_mode: ViewMode,
@@ -61,6 +68,10 @@ impl LibraryApp {
             selected_folder: None,
             files: Vec::new(),
             selected_file: None,
+            show_duplicates: false,
+            duplicates_running: false,
+            duplicate_report: None,
+            duplicate_groups_visible: 20,
             query: String::new(),
             filter: Some(FileCategory::Photo),
             view_mode: ViewMode::Gallery,
@@ -91,6 +102,7 @@ impl LibraryApp {
             return;
         };
         self.scan_running = true;
+        self.duplicate_report = None;
         self.error = None;
         self.status = format!("Indexing {} without changing original files…", folder.display());
         let sender = self.sender.clone();
@@ -100,6 +112,32 @@ impl LibraryApp {
                 .and_then(|mut catalog| catalog.refresh_source(&folder))
                 .map_err(|error| error.to_string());
             let _ = sender.send(JobEvent::ScanFinished(outcome));
+            repaint.request_repaint();
+        });
+    }
+
+    fn start_duplicate_analysis(&mut self, ctx: &egui::Context) {
+        if self.duplicates_running || self.scan_running {
+            return;
+        }
+        let Some(database) = self.db_path.clone() else {
+            self.error = Some("Local catalog is not accessible.".into());
+            return;
+        };
+        self.duplicates_running = true;
+        self.show_duplicates = true;
+        self.selected_file = None;
+        self.duplicate_report = None;
+        self.duplicate_groups_visible = 20;
+        self.error = None;
+        let sender = self.sender.clone();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = Catalog::open(&database)
+                .and_then(|catalog| catalog.photos_for_duplicate_review(50_000))
+                .map(|photos| analyze_photos(&photos))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(JobEvent::DuplicatesFinished(result));
             repaint.request_repaint();
         });
     }
@@ -153,6 +191,18 @@ impl LibraryApp {
                                 "Scan failed: {message}. Previous local catalog kept."
                             ));
                             self.status = "No files were moved or deleted.".into();
+                        }
+                    }
+                }
+                JobEvent::DuplicatesFinished(result) => {
+                    self.duplicates_running = false;
+                    match result {
+                        Ok(report) => {
+                            self.duplicate_report = Some(report);
+                            self.error = None;
+                        }
+                        Err(message) => {
+                            self.error = Some(format!("Duplicate review failed: {message}"));
                         }
                     }
                 }
@@ -217,12 +267,18 @@ impl LibraryApp {
                         self.choose_folder();
                     }
                     if ui.add_enabled(
-                        !self.scan_running,
+                        !self.scan_running && !self.duplicates_running,
                         egui::Button::new("Scan selected folder")
                     ).clicked() {
                         self.start_scan(ctx);
                     }
-                    if self.scan_running {
+                    if ui.add_enabled(
+                        !self.duplicates_running && !self.scan_running,
+                        egui::Button::new("Find duplicates"),
+                    ).clicked() {
+                        self.start_duplicate_analysis(ctx);
+                    }
+                    if self.scan_running || self.duplicates_running {
                         ui.spinner();
                     }
                     if let Some(folder) = &self.selected_folder {
@@ -274,13 +330,20 @@ impl LibraryApp {
                     (Some(FileCategory::Other), "Other files"),
                     (None, "All files"),
                 ] {
-                    if ui.selectable_label(self.filter == category, label).clicked() {
-                        if self.filter != category {
+                    if ui.selectable_label(!self.show_duplicates && self.filter == category, label).clicked() {
+                        if self.filter != category || self.show_duplicates {
                             self.filter = category;
+                            self.show_duplicates = false;
                             self.start_search(ctx, false);
                         }
                     }
                     ui.add_space(3.0);
+                }
+                ui.add_space(8.0);
+                ui.separator();
+                if ui.selectable_label(self.show_duplicates, "Review duplicates").clicked() {
+                    self.show_duplicates = true;
+                    self.selected_file = None;
                 }
                 ui.add_space(14.0);
                 ui.separator();
@@ -350,6 +413,10 @@ impl LibraryApp {
             .frame(egui::Frame::default().fill(Color32::from_rgb(249, 250, 252)))
             .show(ctx, |ui| {
                 ui.add_space(8.0);
+                if self.show_duplicates {
+                    self.duplicates_page(ui);
+                    return;
+                }
                 ui.horizontal(|ui| {
                     let section = match self.filter {
                         Some(FileCategory::Photo) => "Photos",

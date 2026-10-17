@@ -4,6 +4,7 @@
 //! send data to a server, or attempt to guess NAS authentication settings.
 
 pub mod catalog;
+pub mod duplicates;
 
 use std::fs;
 use std::io;
