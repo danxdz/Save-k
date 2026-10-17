@@ -3,6 +3,8 @@
 //! This initial module does not write to source files, follow directory links,
 //! send data to a server, or attempt to guess NAS authentication settings.
 
+pub mod catalog;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
