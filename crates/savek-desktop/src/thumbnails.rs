@@ -169,7 +169,13 @@ fn decode_thumbnail(path: &Path) -> Option<ColorImage> {
     limits.max_image_height = Some(DECODE_EDGE_LIMIT);
     limits.max_alloc = Some(MAX_SOURCE_ALLOC);
     reader.limits(limits);
-    let thumbnail = reader.decode().ok()?.thumbnail(320, 220).to_rgba8();
+    // image::DynamicImage::thumbnail may enlarge tiny inputs when the
+    // requested bounds are larger than the source. Never upscale the
+    // decoded bitmap; scaling for display belongs in the UI renderer.
+    let decoded = reader.decode().ok()?;
+    let target_width = decoded.width().min(320);
+    let target_height = decoded.height().min(220);
+    let thumbnail = decoded.thumbnail(target_width, target_height).to_rgba8();
     let size = [thumbnail.width() as usize, thumbnail.height() as usize];
     Some(ColorImage::from_rgba_unmultiplied(size, thumbnail.as_raw()))
 }
@@ -189,6 +195,24 @@ mod tests {
         pixels.save(&path).unwrap();
         let image = decode_thumbnail(&path).expect("small PNG should decode");
         assert_eq!(image.size, [10, 7]);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn large_png_is_downscaled_within_preview_bounds() {
+        let folder = std::env::temp_dir().join(format!(
+            "savek-large-thumbnail-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("large.png");
+        let pixels = image::RgbaImage::from_pixel(640, 480, image::Rgba([31, 77, 118, 255]));
+        pixels.save(&path).unwrap();
+        let image = decode_thumbnail(&path).expect("large PNG should decode");
+        assert!(image.size[0] <= 320);
+        assert!(image.size[1] <= 220);
+        assert!(image.size[0] < 640);
+        assert!(image.size[1] < 480);
         std::fs::remove_dir_all(folder).unwrap();
     }
 
