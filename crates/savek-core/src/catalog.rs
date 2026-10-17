@@ -161,22 +161,38 @@ impl Catalog {
         Ok(RefreshStats { indexed_files: count, skipped_links, skipped_mounts })
     }
 
-    /// Search across all retained source snapshots. Results may describe files
-    /// on currently disconnected or changed sources; no file I/O is performed.
+    /// Search across retained source snapshots, newest modified files first.
+    /// The query is a literal filename/path substring; sources need not be online.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<CatalogEntry>, CatalogError> {
-        // User searches are literal substring matches, not SQL wildcard patterns.
+        self.search_filtered(query, None, 0, limit)
+    }
+
+    /// Paginated search to avoid loading thousands of catalog entries into the UI.
+    /// Offset and limit refer to metadata records, not file reads. These snapshots
+    /// can change between pages if the user rescans, so stable pagination will
+    /// eventually need an explicit snapshot/version id.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        category: Option<FileCategory>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<CatalogEntry>, CatalogError> {
         let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{escaped}%");
-        let limit = i64::try_from(limit.min(1000)).unwrap_or(1000);
+        let category_filter = category.map(category_name);
+        let limit = i64::try_from(limit.min(240)).unwrap_or(240);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let mut statement = self.connection.prepare(
             "SELECT f.path, s.root, f.size_bytes, f.category, f.modified_unix_seconds
              FROM catalog_files f
              JOIN catalog_sources s ON s.id = f.source_id
-             WHERE f.name LIKE ?1 ESCAPE '\\' OR f.path LIKE ?1 ESCAPE '\\'
-             ORDER BY f.name COLLATE NOCASE, f.path
-             LIMIT ?2"
+             WHERE (f.name LIKE ?1 ESCAPE '\\' OR f.path LIKE ?1 ESCAPE '\\')
+               AND (?2 IS NULL OR f.category = ?2)
+             ORDER BY f.modified_unix_seconds DESC, f.path COLLATE NOCASE, f.path
+             LIMIT ?3 OFFSET ?4"
         )?;
-        let rows = statement.query_map(params![pattern, limit], |row| {
+        let rows = statement.query_map(params![pattern, category_filter, limit, offset], |row| {
             let size: i64 = row.get(2)?;
             let category: String = row.get(3)?;
             Ok(CatalogEntry {
@@ -268,6 +284,31 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert!(catalog.refresh_source(&root).is_err());
         assert_eq!(catalog.file_count().unwrap(), 1);
+        drop(catalog);
+        fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn pages_are_filtered_and_do_not_mutate_sources() {
+        let temporary = temp_dir();
+        let root = temporary.join("album");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.jpg"), b"a").unwrap();
+        fs::write(root.join("b.jpg"), b"b").unwrap();
+        fs::write(root.join("notes.txt"), b"notes").unwrap();
+        let mut catalog = Catalog::open(&temporary.join("library.sqlite")).unwrap();
+        assert_eq!(catalog.refresh_source(&root).unwrap().indexed_files, 3);
+        let first = catalog.search_filtered("", Some(FileCategory::Photo), 0, 1).unwrap();
+        let second = catalog.search_filtered("", Some(FileCategory::Photo), 1, 1).unwrap();
+        let third = catalog.search_filtered("", Some(FileCategory::Photo), 2, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(third.is_empty());
+        assert_ne!(first[0].path, second[0].path);
+        assert_eq!(
+            catalog.search_filtered("", Some(FileCategory::Document), 0, 10).unwrap().len(),
+            1
+        );
         drop(catalog);
         fs::remove_dir_all(temporary).unwrap();
     }
