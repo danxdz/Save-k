@@ -32,7 +32,7 @@ impl LibraryApp {
         };
         let total_groups = report.exact_groups.len() + report.visual_groups.len();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("{} indexed photos checked", report.photo_count)).strong());
+            ui.label(RichText::new(format!("{} indexed photo entries considered", report.photo_count)).strong());
             ui.separator();
             ui.label(format!("{} exact groups", report.exact_groups.len()));
             ui.separator();
