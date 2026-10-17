@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/savek-core"]
+members = ["crates/savek-core", "crates/savek-cli"]
 resolver = "2"
 
 [workspace.package]
