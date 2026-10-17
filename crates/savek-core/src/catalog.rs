@@ -208,6 +208,45 @@ impl Catalog {
         Ok(entries)
     }
 
+    /// Read the complete set of indexed photo metadata for an explicit
+    /// user-initiated duplicate review, with a hard bound on snapshot size.
+    /// Does not touch any source file, only reads the local SQLite catalog.
+    pub fn photos_for_duplicate_review(
+        &self,
+        max_files: usize,
+    ) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let max_files = max_files.min(50_000);
+        let sql_limit = i64::try_from(max_files + 1).unwrap_or(50_001);
+        let mut statement = self.connection.prepare(
+            "SELECT f.path, s.root, f.size_bytes, f.category, f.modified_unix_seconds
+             FROM catalog_files f
+             JOIN catalog_sources s ON s.id = f.source_id
+             WHERE f.category = 'photo'
+             ORDER BY f.path COLLATE NOCASE
+             LIMIT ?1"
+        )?;
+        let rows = statement.query_map(params![sql_limit], |row| {
+            let size: i64 = row.get(2)?;
+            Ok(CatalogEntry {
+                path: row.get(0)?,
+                source_root: row.get(1)?,
+                size_bytes: u64::try_from(size).unwrap_or(0),
+                category: FileCategory::Photo,
+                modified_unix_seconds: row.get(4)?,
+            })
+        })?;
+        let mut photos = Vec::new();
+        for row in rows {
+            photos.push(row?);
+        }
+        if photos.len() > max_files {
+            return Err(CatalogError::InvalidSource(
+                "too many photos for the first duplicate analyzer (50,000 maximum)",
+            ));
+        }
+        Ok(photos)
+    }
+
     pub fn file_count(&self) -> Result<u64, CatalogError> {
         let count: i64 = self.connection.query_row(
             "SELECT COUNT(*) FROM catalog_files", [], |row| row.get(0)
