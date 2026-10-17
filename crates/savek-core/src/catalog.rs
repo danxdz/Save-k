@@ -353,6 +353,24 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_review_reads_only_photos_and_respects_limit() {
+        let temporary = temp_dir();
+        let root = temporary.join("sample-library");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.jpg"), b"photo 1").unwrap();
+        fs::write(root.join("b.png"), b"photo 2").unwrap();
+        fs::write(root.join("notes.txt"), b"document").unwrap();
+        let mut catalog = Catalog::open(&temporary.join("library.sqlite")).unwrap();
+        catalog.refresh_source(&root).unwrap();
+        let photos = catalog.photos_for_duplicate_review(2).unwrap();
+        assert_eq!(photos.len(), 2);
+        assert!(photos.iter().all(|p| p.category == FileCategory::Photo));
+        assert!(catalog.photos_for_duplicate_review(1).is_err());
+        drop(catalog);
+        fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
     fn refuses_database_inside_indexed_folder() {
         let root = temp_dir();
         let mut catalog = Catalog::open(&root.join("library.sqlite")).unwrap();
