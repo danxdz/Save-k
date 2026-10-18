@@ -18,6 +18,7 @@ pub enum FileCategory {
     Audio,
     Document,
     Archive,
+    Cad,
     Other,
 }
 
@@ -149,6 +150,7 @@ pub fn category_for_path(path: &Path) -> FileCategory {
         "mp3" | "m4a" | "flac" | "wav" | "ogg" | "aac" => FileCategory::Audio,
         "pdf" | "txt" | "md" | "docx" | "doc" | "xlsx" | "xls" | "pptx" | "ppt" | "odt" => FileCategory::Document,
         "zip" | "7z" | "rar" | "tar" | "gz" => FileCategory::Archive,
+        "step" | "stp" | "iges" | "igs" | "stl" | "obj" => FileCategory::Cad,
         _ => FileCategory::Other,
     }
 }
@@ -194,6 +196,14 @@ mod tests {
     #[test]
     fn recognizes_document_extension() {
         assert_eq!(category_for_path(Path::new("LETTER.PDF")), FileCategory::Document);
+    }
+
+    #[test]
+    fn recognizes_cad_extensions() {
+        for name in ["PART.STEP", "assembly.stp", "design.IGES", "mesh.stl"] {
+            assert_eq!(category_for_path(Path::new(name)), FileCategory::Cad);
+        }
+        assert_eq!(category_for_path(Path::new("image.png")), FileCategory::Photo);
     }
 
     #[cfg(unix)]
