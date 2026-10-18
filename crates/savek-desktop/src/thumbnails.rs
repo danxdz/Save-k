@@ -248,6 +248,22 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_rgb_jpeg_decodes_to_thumbnail() {
+        let folder = std::env::temp_dir().join(format!(
+            "savek-jpeg-preview-test-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("photo.jpg");
+        let rgb = image::RgbImage::from_pixel(
+            32, 24, image::Rgb([120, 90, 60])
+        );
+        image::DynamicImage::ImageRgb8(rgb).save(&path).unwrap();
+        let preview = decode_thumbnail(&path).expect("standard JPEG should decode");
+        assert_eq!(preview.size, [32, 24]);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn large_png_is_downscaled_within_preview_bounds() {
         let folder = std::env::temp_dir().join(format!(
             "savek-large-thumbnail-test-{}",
