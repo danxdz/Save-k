@@ -90,6 +90,30 @@ impl Catalog {
              CREATE INDEX IF NOT EXISTS idx_catalog_name ON catalog_files(name);
              CREATE INDEX IF NOT EXISTS idx_catalog_category ON catalog_files(category);"
         )?;
+        // Existing local catalogs store extensions under the "other" label.
+        // Reclassify only metadata records, not source files, once per catalog.
+        // Keep SQLite user_version for future migrations.
+        let version: i64 = connection.query_row(
+            "PRAGMA user_version", [], |row| row.get(0)
+        )?;
+        if version == 0 {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE catalog_files
+                 SET category = 'cad'
+                 WHERE category = 'other'
+                   AND (
+                     lower(name) LIKE '%.step'
+                     OR lower(name) LIKE '%.stp'
+                     OR lower(name) LIKE '%.iges'
+                     OR lower(name) LIKE '%.igs'
+                     OR lower(name) LIKE '%.stl'
+                     OR lower(name) LIKE '%.obj'
+                   );
+                 PRAGMA user_version = 1;
+                 COMMIT;"
+            )?;
+        }
         Ok(Self { connection, database_path })
     }
 
@@ -266,6 +290,7 @@ fn category_name(category: FileCategory) -> &'static str {
         FileCategory::Audio => "audio",
         FileCategory::Document => "document",
         FileCategory::Archive => "archive",
+        FileCategory::Cad => "cad",
         FileCategory::Other => "other",
     }
 }
@@ -276,6 +301,7 @@ fn parse_category(category: &str) -> FileCategory {
         "audio" => FileCategory::Audio,
         "document" => FileCategory::Document,
         "archive" => FileCategory::Archive,
+        "cad" => FileCategory::Cad,
         _ => FileCategory::Other,
     }
 }
@@ -368,6 +394,30 @@ mod tests {
         assert!(catalog.photos_for_duplicate_review(1).is_err());
         drop(catalog);
         fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn reclassifies_legacy_step_entries_without_rescanning_source() {
+        let folder = temp_dir();
+        let root = folder.join("models");
+        fs::create_dir(&root).unwrap();
+        let step = root.join("assembly.STEP");
+        fs::write(&step, b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;").unwrap();
+        let db = folder.join("library.sqlite");
+        let mut catalog = Catalog::open(&db).unwrap();
+        catalog.refresh_source(&root).unwrap();
+        catalog.connection.execute(
+            "UPDATE catalog_files SET category = 'other'", []
+        ).unwrap();
+        catalog.connection.execute_batch("PRAGMA user_version = 0;").unwrap();
+        drop(catalog);
+        let reopened = Catalog::open(&db).unwrap();
+        let records = reopened.search_filtered("", Some(FileCategory::Cad), 0, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].category, FileCategory::Cad);
+        assert!(step.exists());
+        drop(reopened);
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
