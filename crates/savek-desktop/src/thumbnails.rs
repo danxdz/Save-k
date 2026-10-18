@@ -74,6 +74,13 @@ impl Thumbnails {
         self.pending = 0;
     }
 
+    pub fn failure_reason(&self, path: &str) -> Option<&'static str> {
+        match self.items.get(path) {
+            Some(ThumbState::Unavailable(reason)) => Some(*reason),
+            _ => None,
+        }
+    }
+
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.results.try_recv() {
             if message.generation != self.generation {
@@ -157,21 +164,40 @@ fn placeholder(painter: &egui::Painter, center: Pos2, caption: &str) {
 /// The decoder runs off the UI thread. Both file size and decoder allocations
 /// are capped as best effort; some image formats/decoders may ignore limits.
 fn decode_thumbnail(path: &Path) -> Result<ColorImage, &'static str> {
-    let metadata = std::fs::metadata(path).map_err(|_| "File missing")?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| "File missing")?;
+    if metadata.file_type().is_symlink() {
+        return Err("Linked file not previewed");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("Linked file not previewed");
+        }
+    }
+    if !metadata.is_file() {
+        return Err("Not a regular file");
+    }
     if metadata.len() > MAX_SOURCE_BYTES {
         return Err("File over 40 MB");
     }
     let mut reader = image::ImageReader::open(path)
         .map_err(|_| "Cannot open")?
         .with_guessed_format()
-        .map_err(|_| "Unknown format")?;
+        .map_err(|_| "Cannot detect image format")?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(DECODE_EDGE_LIMIT);
     limits.max_image_height = Some(DECODE_EDGE_LIMIT);
     limits.max_alloc = Some(MAX_SOURCE_ALLOC);
     reader.limits(limits);
     // Do not enlarge small source images during thumbnail generation.
-    let decoded = reader.decode().map_err(|_| "Cannot decode")?;
+    let decoded = reader.decode().map_err(|err| match err {
+        image::ImageError::Unsupported(_) => "Unsupported image encoding",
+        image::ImageError::Decoding(_) => "Corrupt or unsupported image",
+        image::ImageError::Limits(_) => "Image exceeds decoder limits",
+        image::ImageError::IoError(_) => "Cannot read image bytes",
+        _ => "Cannot decode image",
+    })?;
     let target_width = decoded.width().min(320);
     let target_height = decoded.height().min(220);
     let thumbnail = decoded.thumbnail(target_width, target_height).to_rgba8();
@@ -226,6 +252,18 @@ mod tests {
         std::fs::write(&path, b"not an actual PNG").unwrap();
         assert!(decode_thumbnail(&path).is_err());
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn tiny_fake_jpeg_is_reported_as_unsupported() {
+        let root = std::env::temp_dir().join(format!(
+            "savek-fake-jpg-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("looks-like-photo.jpg");
+        std::fs::write(&file, b"not actually a JPEG").unwrap();
+        assert!(decode_thumbnail(&file).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! No scanned file is moved, renamed, modified or uploaded.
 mod thumbnails;
 mod duplicate_view;
+mod cad;
 
 use eframe::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use savek_core::catalog::{Catalog, CatalogEntry, RefreshStats};
@@ -37,6 +38,7 @@ struct LibraryApp {
     selected_folder: Option<PathBuf>,
     files: Vec<CatalogEntry>,
     selected_file: Option<CatalogEntry>,
+    cad_header: Option<(String, String)>,
     show_duplicates: bool,
     duplicates_running: bool,
     duplicate_report: Option<DuplicateReport>,
@@ -68,6 +70,7 @@ impl LibraryApp {
             selected_folder: None,
             files: Vec::new(),
             selected_file: None,
+            cad_header: None,
             show_duplicates: false,
             duplicates_running: false,
             duplicate_report: None,
@@ -327,6 +330,7 @@ impl LibraryApp {
                     (Some(FileCategory::Document), "Documents"),
                     (Some(FileCategory::Audio), "Audio"),
                     (Some(FileCategory::Archive), "Archives"),
+                    (Some(FileCategory::Cad), "3D CAD files"),
                     (Some(FileCategory::Other), "Other files"),
                     (None, "All files"),
                 ] {
@@ -398,6 +402,44 @@ impl LibraryApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new(&entry.path).small().color(SOFT_TEXT));
                 ui.add_space(8.0);
+                if entry.category == FileCategory::Photo {
+                    if let Some(reason) = self.thumbnails.failure_reason(&entry.path) {
+                        ui.colored_label(
+                            Color32::from_rgb(181, 92, 49),
+                            format!("Preview unavailable: {reason}"),
+                        );
+                        ui.label(RichText::new(
+                            "JPG/PNG extensions alone don't guarantee decodable image data."
+                        ).small().color(SOFT_TEXT));
+                    }
+                }
+                if entry.category == FileCategory::Cad {
+                    ui.label(RichText::new(
+                        "3D model rendering is not built in yet."
+                    ).small().color(SOFT_TEXT));
+                    if cad::is_step(Path::new(&entry.path)) {
+                        if ui.button("Inspect STEP header").clicked() {
+                            let details = cad::inspect_header(Path::new(&entry.path))
+                                .unwrap_or_else(|error| format!("Cannot read STEP header: {error}"));
+                            self.cad_header = Some((entry.path.clone(), details));
+                        }
+                        if let Some((path, details)) = &self.cad_header {
+                            if path == &entry.path {
+                                ui.label(RichText::new(details).small().color(SOFT_TEXT));
+                            }
+                        }
+                    }
+                    if ui.button("Open in default CAD viewer…").clicked() {
+                        if let Err(error) = opener::open(Path::new(&entry.path)) {
+                            self.error = Some(format!(
+                                "Could not open system CAD viewer: {error}"
+                            ));
+                        }
+                    }
+                    ui.label(RichText::new(
+                        "Opens an external app chosen by Windows; only click if you trust it."
+                    ).small().color(SOFT_TEXT));
+                }
                 if ui.button("Copy file path").clicked() {
                     ui.ctx().copy_text(entry.path.clone());
                 }
@@ -424,6 +466,7 @@ impl LibraryApp {
                         Some(FileCategory::Document) => "Documents",
                         Some(FileCategory::Audio) => "Audio",
                         Some(FileCategory::Archive) => "Archives",
+                        Some(FileCategory::Cad) => "3D CAD files",
                         Some(FileCategory::Other) => "Other files",
                         None => "All files",
                     };
@@ -611,6 +654,7 @@ fn category_name(category: FileCategory) -> &'static str {
         FileCategory::Audio => "Audio",
         FileCategory::Document => "Document",
         FileCategory::Archive => "Archive",
+        FileCategory::Cad => "3D CAD",
         FileCategory::Other => "File",
     }
 }
