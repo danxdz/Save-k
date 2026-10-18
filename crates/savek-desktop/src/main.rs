@@ -281,6 +281,11 @@ impl LibraryApp {
                     ).clicked() {
                         self.start_duplicate_analysis(ctx);
                     }
+                    if ui.button("Retry previews").on_hover_text(
+                        "Clear the memory-only thumbnail cache and retry visible images"
+                    ).clicked() {
+                        self.thumbnails.clear();
+                    }
                     if self.scan_running || self.duplicates_running {
                         ui.spinner();
                     }
@@ -403,15 +408,27 @@ impl LibraryApp {
                 ui.label(RichText::new(&entry.path).small().color(SOFT_TEXT));
                 ui.add_space(8.0);
                 if entry.category == FileCategory::Photo {
-                    if let Some(reason) = self.thumbnails.failure_reason(&entry.path) {
+                    if let Some(reason) = self.thumbnails.failure_reason(&entry.path).map(str::to_owned) {
                         ui.colored_label(
                             Color32::from_rgb(181, 92, 49),
-                            format!("Preview unavailable: {reason}"),
+                            "Preview unavailable"
                         );
+                        ui.label(RichText::new(&reason).small().color(SOFT_TEXT));
                         ui.label(RichText::new(
-                            "JPG/PNG extensions alone don't guarantee decodable image data."
+                            "The extension may be misleading or the image encoding unsupported. This doesn't prove the file is corrupt."
                         ).small().color(SOFT_TEXT));
+                        if ui.small_button("Copy decoder error").clicked() {
+                            ui.ctx().copy_text(reason.clone());
+                        }
                     }
+                    if ui.button("Open original in default image viewer…").clicked() {
+                        if let Err(error) = opener::open(Path::new(&entry.path)) {
+                            self.error = Some(format!("Could not open default image viewer: {error}"));
+                        }
+                    }
+                    ui.label(RichText::new(
+                        "Uses an external application chosen by Windows. Only open files you trust."
+                    ).small().color(SOFT_TEXT));
                 }
                 if entry.category == FileCategory::Cad {
                     ui.label(RichText::new(
@@ -566,7 +583,11 @@ impl LibraryApp {
                                 if response.clicked() {
                                     self.selected_file = Some(file.clone());
                                 }
-                                response.on_hover_text(&file.path);
+                                let tooltip = match self.thumbnails.failure_reason(&file.path) {
+                                    Some(reason) => format!("{}\nPreview failure: {reason}", file.path),
+                                    None => file.path.clone(),
+                                };
+                                response.on_hover_text(tooltip);
                             }
                         });
                         ui.add_space(10.0);
