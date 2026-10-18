@@ -5,6 +5,7 @@
 use eframe::egui::{self, Color32, ColorImage, FontId, Pos2, Rect, TextureHandle, TextureOptions};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::io::Read;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 const CACHE_CAP: usize = 96;
@@ -16,7 +17,7 @@ const DECODE_EDGE_LIMIT: u32 = 9000;
 enum ThumbState {
     Queued,
     Loaded(TextureHandle),
-    Unavailable(&'static str),
+    Unavailable(String),
 }
 struct Request {
     generation: u64,
@@ -25,7 +26,7 @@ struct Request {
 struct ResultMessage {
     generation: u64,
     path: String,
-    image: Result<ColorImage, &'static str>,
+    image: Result<ColorImage, String>,
 }
 
 /// Cache holding at most CACHE_CAP decoded thumbnails as GPU textures.
@@ -74,9 +75,9 @@ impl Thumbnails {
         self.pending = 0;
     }
 
-    pub fn failure_reason(&self, path: &str) -> Option<&'static str> {
+    pub fn failure_reason(&self, path: &str) -> Option<&str> {
         match self.items.get(path) {
-            Some(ThumbState::Unavailable(reason)) => Some(*reason),
+            Some(ThumbState::Unavailable(reason)) => Some(reason.as_str()),
             _ => None,
         }
     }
@@ -143,8 +144,10 @@ impl Thumbnails {
             Some(ThumbState::Queued) => {
                 placeholder(painter, rect.center(), "Loading…");
             }
-            Some(ThumbState::Unavailable(reason)) => {
-                placeholder(painter, rect.center(), reason);
+            Some(ThumbState::Unavailable(_)) => {
+                // Keep error details in the inspector; long decoder errors must
+                // never spill across adjacent gallery cards.
+                placeholder(painter, rect.center(), "No preview");
             }
             None => placeholder(painter, rect.center(), "Photo"),
         }
@@ -163,46 +166,67 @@ fn placeholder(painter: &egui::Painter, center: Pos2, caption: &str) {
 
 /// The decoder runs off the UI thread. Both file size and decoder allocations
 /// are capped as best effort; some image formats/decoders may ignore limits.
-fn decode_thumbnail(path: &Path) -> Result<ColorImage, &'static str> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| "File missing")?;
+fn decode_thumbnail(path: &Path) -> Result<ColorImage, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("Cannot read file metadata: {e}"))?;
     if metadata.file_type().is_symlink() {
-        return Err("Linked file not previewed");
+        return Err("Linked file not previewed".into());
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         if metadata.file_attributes() & 0x400 != 0 {
-            return Err("Linked file not previewed");
+            return Err("Linked file not previewed".into());
         }
     }
     if !metadata.is_file() {
-        return Err("Not a regular file");
+        return Err("Not a regular file".into());
     }
     if metadata.len() > MAX_SOURCE_BYTES {
-        return Err("File over 40 MB");
+        return Err("File over the 40 MB preview limit".into());
     }
+    let header_kind = detect_image_header(path).unwrap_or("Unknown image signature");
     let mut reader = image::ImageReader::open(path)
-        .map_err(|_| "Cannot open")?
+        .map_err(|e| format!("Cannot open image: {e}"))?
         .with_guessed_format()
-        .map_err(|_| "Cannot detect image format")?;
+        .map_err(|e| format!("Cannot recognize image data: {e}"))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(DECODE_EDGE_LIMIT);
     limits.max_image_height = Some(DECODE_EDGE_LIMIT);
     limits.max_alloc = Some(MAX_SOURCE_ALLOC);
     reader.limits(limits);
-    // Do not enlarge small source images during thumbnail generation.
-    let decoded = reader.decode().map_err(|err| match err {
-        image::ImageError::Unsupported(_) => "Unsupported image encoding",
-        image::ImageError::Decoding(_) => "Corrupt or unsupported image",
-        image::ImageError::Limits(_) => "Image exceeds decoder limits",
-        image::ImageError::IoError(_) => "Cannot read image bytes",
-        _ => "Cannot decode image",
-    })?;
+    // Preserve the real decoder error rather than calling every failed JPEG
+    // or PNG "corrupt". A different image viewer might support the encoding.
+    let decoded = reader.decode()
+        .map_err(|e| format!("{header_kind}: {e}"))?;
     let target_width = decoded.width().min(320);
     let target_height = decoded.height().min(220);
     let thumbnail = decoded.thumbnail(target_width, target_height).to_rgba8();
     let size = [thumbnail.width() as usize, thumbnail.height() as usize];
     Ok(ColorImage::from_rgba_unmultiplied(size, thumbnail.as_raw()))
+}
+
+/// Small, read-only file-signature check for troubleshooting. Not a guarantee
+/// that the image bytes are valid or decodable.
+fn detect_image_header(path: &Path) -> Option<&'static str> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0_u8; 16];
+    let len = file.read(&mut header).ok()?;
+    let bytes = &header[..len];
+    if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+        Some("PNG signature")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("JPEG signature")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("GIF signature")
+    } else if bytes.starts_with(b"BM") {
+        Some("BMP signature")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("WebP signature")
+    } else if bytes.starts_with(b"II\x2a\0") || bytes.starts_with(b"MM\0\x2a") {
+        Some("TIFF signature")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +244,22 @@ mod tests {
         pixels.save(&path).unwrap();
         let image = decode_thumbnail(&path).expect("small PNG should decode");
         assert_eq!(image.size, [10, 7]);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn ordinary_rgb_jpeg_decodes_to_thumbnail() {
+        let folder = std::env::temp_dir().join(format!(
+            "savek-jpeg-preview-test-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("photo.jpg");
+        let rgb = image::RgbImage::from_pixel(
+            32, 24, image::Rgb([120, 90, 60])
+        );
+        image::DynamicImage::ImageRgb8(rgb).save(&path).unwrap();
+        let preview = decode_thumbnail(&path).expect("standard JPEG should decode");
+        assert_eq!(preview.size, [32, 24]);
         std::fs::remove_dir_all(folder).unwrap();
     }
 
@@ -263,6 +303,21 @@ mod tests {
         let file = root.join("looks-like-photo.jpg");
         std::fs::write(&file, b"not actually a JPEG").unwrap();
         assert!(decode_thumbnail(&file).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_file_signature_without_trusting_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "savek-header-test-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fake = root.join("claimed-jpeg.jpg");
+        std::fs::write(&fake, b"not JPEG data").unwrap();
+        assert_eq!(detect_image_header(&fake), None);
+        let png_named_jpg = root.join("png-with-jpg-extension.jpg");
+        std::fs::write(&png_named_jpg, &[137, 80, 78, 71, 13, 10, 26, 10, 0]).unwrap();
+        assert_eq!(detect_image_header(&png_named_jpg), Some("PNG signature"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
